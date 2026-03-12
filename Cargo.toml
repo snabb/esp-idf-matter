@@ -22,13 +22,6 @@ rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 rs-matter-stack = { git = "https://github.com/sysgrok/rs-matter-stack", branch = "next" }
 #rs-matter-stack = { path = "../rs-matter-stack" }
-#edge-nal = { git = "https://github.com/sysgrok/edge-net" }
-#edge-nal-std = { git = "https://github.com/sysgrok/edge-net" }
-#edge-mdns = { git = "https://github.com/sysgrok/edge-net" }
-embedded-svc = { git = "https://github.com/esp-rs/embedded-svc" }
-esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc" }
-esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal" }
-esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys" }
 
 [profile.release]
 opt-level = "s"
@@ -171,8 +164,7 @@ enumset = { version = "1", default-features = false }
 embassy-futures = "0.1"
 embassy-sync = "0.7"
 embassy-time = "0.5"
-esp-idf-svc = { version = "0.51", default-features = false, features = ["alloc", "embassy-time-driver", "experimental"] }
-embedded-svc = { version = "0.28", default-features = false }
+esp-idf-svc = { version = "0.52", default-features = false, features = ["alloc", "embassy-time-driver", "experimental"] }
 rs-matter-stack = { version = "0.1", default-features = false }
 async-io = { version = "=2.0.0", default-features = false } # Workaround for https://github.com/smol-rs/async-lock/issues/84
 edge-nal = "0.6"

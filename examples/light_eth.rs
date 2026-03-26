@@ -25,8 +25,6 @@ mod example {
 
     use alloc::sync::Arc;
 
-    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-
     use esp_idf_matter::eth::EspEthMatterStack;
     use esp_idf_matter::init_async_io;
     use esp_idf_matter::matter::crypto::{default_crypto, Crypto};
@@ -142,7 +140,7 @@ mod example {
         wifi.wait_netif_up().await?;
 
         // Create the default crypto provider using the STD CSPRNG provided by the `rand` crate
-        let crypto = default_crypto::<NoopRawMutex, _>(rand::thread_rng(), DAC_PRIVKEY);
+        let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
 
         let mut weak_rand = crypto.weak_rand()?;
 

@@ -1,7 +1,5 @@
 //! This module provides the ESP-IDF implementation of the Wifi and Thread Matter stacks.
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-
 use rs_matter_stack::matter::utils::init::{init, Init};
 use rs_matter_stack::network::Embedding;
 use rs_matter_stack::wireless::WirelessBle;
@@ -37,9 +35,7 @@ pub type EspWirelessMatterStack<'a, const B: usize, T, E> =
 
 /// A type alias for an ESP-IDF implementation of the `Network` trait for a Matter stack running over
 /// BLE during commissioning, and then over either WiFi or Thread when operating.
-// TODO: Revert to `EspRawMutex` when `esp-idf-svc` is updated to `embassy-sync 0.7`
-pub type EspWirelessBle<T, E> =
-    WirelessBle<CriticalSectionRawMutex /*EspRawMutex*/, T, EspGatt<E>>;
+pub type EspWirelessBle<T, E> = WirelessBle<T, EspGatt<E>>;
 
 /// An embedding of the ESP IDF Bluedroid Gatt peripheral context for the `WirelessBle` network type from `rs-matter-stack`.
 ///
@@ -47,7 +43,7 @@ pub type EspWirelessBle<T, E> =
 ///
 /// Usage:
 /// ```no_run
-/// MatterStack<WirelessBle<EspRawMutex, Wifi, KvBlobBuf<EspGatt<E>>>>::new(...);
+/// MatterStack<WirelessBle<Wifi, KvBlobBuf<EspGatt<E>>>>::new(...);
 /// ```
 ///
 /// ... where `E` can be a next-level, user-supplied embedding or just `()` if the user does not need to embed anything.

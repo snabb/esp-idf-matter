@@ -6,8 +6,6 @@ use core::fmt::Debug;
 use alloc::borrow::ToOwned;
 
 use embassy_futures::select::select;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
 use enumset::enum_set;
 
 use esp_idf_svc::bt::ble::gap::{BleGapEvent, EspBleGap};
@@ -32,7 +30,9 @@ use rs_matter_stack::matter::utils::cell::RefCell;
 use rs_matter_stack::matter::utils::init::{init, Init};
 use rs_matter_stack::matter::utils::select::Coalesce;
 use rs_matter_stack::matter::utils::storage::Vec;
+use rs_matter_stack::matter::utils::sync::blocking::raw::StdRawMutex;
 use rs_matter_stack::matter::utils::sync::blocking::Mutex;
+use rs_matter_stack::matter::utils::sync::Signal;
 
 const MAX_MTU_SIZE: usize = 512;
 
@@ -93,11 +93,10 @@ impl State {
 /// The `'static` state of the `EspBtpGattPeripheral` struct.
 /// Isolated as a separate struct to allow for `const fn` construction
 /// and static allocation.
-// TODO: Revert to `EspRawMutex` when `esp-idf-svc` is updated to `embassy-sync 0.7`
 pub struct EspBtpGattContext {
-    state: Mutex<CriticalSectionRawMutex /*EspRawMutex*/, RefCell<State>>,
-    state_changed: Signal<CriticalSectionRawMutex /*EspRawMutex*/, ()>,
-    ind_ack: Signal<CriticalSectionRawMutex /*EspRawMutex*/, ()>,
+    state: Mutex<RefCell<State>, StdRawMutex>,
+    state_changed: Signal<Option<()>, StdRawMutex>,
+    ind_ack: Signal<Option<()>, StdRawMutex>,
 }
 
 impl EspBtpGattContext {
@@ -107,8 +106,8 @@ impl EspBtpGattContext {
     pub const fn new() -> Self {
         Self {
             state: Mutex::new(RefCell::new(State::new())),
-            state_changed: Signal::new(),
-            ind_ack: Signal::new(),
+            state_changed: Signal::new(None),
+            ind_ack: Signal::new(None),
         }
     }
 
@@ -117,8 +116,8 @@ impl EspBtpGattContext {
     pub fn init() -> impl Init<Self> {
         init!(Self {
             state <- Mutex::init(RefCell::init(State::init())),
-            state_changed: Signal::new(),
-            ind_ack: Signal::new(),
+            state_changed: Signal::new(None),
+            ind_ack: Signal::new(None),
         })
     }
 
@@ -136,8 +135,17 @@ impl EspBtpGattContext {
             state.out_data.clear();
         });
 
-        self.state_changed.reset();
-        self.ind_ack.reset();
+        self.state_changed.modify(|s| {
+            *s = None;
+
+            (false, ())
+        });
+
+        self.ind_ack.modify(|s| {
+            *s = None;
+
+            (false, ())
+        });
 
         Ok(())
     }
@@ -262,7 +270,7 @@ where
             })?;
 
             if !processed {
-                self.context.state_changed.wait().await;
+                self.context.state_changed.wait_signalled().await;
             }
         }
     }
@@ -273,7 +281,7 @@ where
         T: Borrow<BtDriver<'d, M>>,
     {
         loop {
-            self.context.ind_ack.wait().await;
+            self.context.ind_ack.wait_signalled().await;
 
             self.context.state.lock(|state| {
                 let mut state = state.borrow_mut();
@@ -421,15 +429,13 @@ where
             GattsEvent::Mtu { conn_id, mtu } => {
                 self.register_conn_mtu(conn_id, mtu)?;
             }
-            GattsEvent::PeerConnected { conn_id, addr, .. } => {
-                if self.create_conn(conn_id, addr)? {
-                    self.gap.stop_advertising()?;
-                }
+            GattsEvent::PeerConnected { conn_id, addr, .. }
+                if self.create_conn(conn_id, addr)? =>
+            {
+                self.gap.stop_advertising()?;
             }
-            GattsEvent::PeerDisconnected { addr, .. } => {
-                if self.delete_conn(addr)? {
-                    self.gap.start_advertising()?;
-                }
+            GattsEvent::PeerDisconnected { addr, .. } if self.delete_conn(addr)? => {
+                self.gap.start_advertising()?;
             }
             GattsEvent::Write {
                 conn_id,

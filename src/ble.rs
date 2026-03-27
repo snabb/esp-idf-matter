@@ -6,6 +6,8 @@ use core::fmt::Debug;
 use alloc::borrow::ToOwned;
 
 use embassy_futures::select::select;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
 use enumset::enum_set;
 
 use esp_idf_svc::bt::ble::gap::{BleGapEvent, EspBleGap};
@@ -30,7 +32,6 @@ use rs_matter_stack::matter::utils::cell::RefCell;
 use rs_matter_stack::matter::utils::init::{init, Init};
 use rs_matter_stack::matter::utils::select::Coalesce;
 use rs_matter_stack::matter::utils::storage::Vec;
-use rs_matter_stack::matter::utils::sync::blocking::raw::StdRawMutex;
 use rs_matter_stack::matter::utils::sync::blocking::Mutex;
 use rs_matter_stack::matter::utils::sync::Signal;
 
@@ -94,9 +95,9 @@ impl State {
 /// Isolated as a separate struct to allow for `const fn` construction
 /// and static allocation.
 pub struct EspBtpGattContext {
-    state: Mutex<RefCell<State>, StdRawMutex>,
-    state_changed: Signal<Option<()>, StdRawMutex>,
-    ind_ack: Signal<Option<()>, StdRawMutex>,
+    state: Mutex<RefCell<State>, CriticalSectionRawMutex>,
+    state_changed: Signal<Option<()>, CriticalSectionRawMutex>,
+    ind_ack: Signal<Option<()>, CriticalSectionRawMutex>,
 }
 
 impl EspBtpGattContext {

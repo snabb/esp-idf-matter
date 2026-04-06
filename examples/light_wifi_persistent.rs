@@ -1,35 +1,39 @@
-//! An example utilizing the `EspEthMatterStack` struct.
-//! As the name suggests, this Matter stack assembly uses Ethernet as the main transport, as well as for commissioning.
+//! An example utilizing the `EspWifiMatterStack` struct
+//! and additionally persisting the `rs-matter` state to the NOR Flash.
 //!
-//! Notice thart we actually don't use Ethernet for real, as ESP32s don't have Ethernet ports out of the box.
-//! Instead, we utilize Thread, which - from the POV of Matter - is indistinguishable from Ethernet as long as the Matter
-//! stack is not concerned with connecting to the Thread network, managing its credentials etc. and can assume it "pre-exists".
+//! As the name suggests, this Matter stack assembly uses Wifi as the main transport,
+//! and thus BLE for commissioning.
+//!
+//! If you want to use Ethernet, utilize `EspEthMatterStack` instead.
+//! If you want to use non-concurrent commissioning, call `run` instead of `run_coex`
+//! and provision a higher `BUMP_SIZE` because the non-concurrent commissioning currently has a much-higher
+//! memory requirements on the futures' sizes (but lower memory requirements inside ESP-IDF).
+//! (Note: Alexa does not work (yet) with non-concurrent commissioning.)
 //!
 //! The example implements a fictitious Light device (an On-Off Matter cluster).
 #![allow(unexpected_cfgs)]
 #![recursion_limit = "256"]
 
 fn main() -> Result<(), anyhow::Error> {
-    #[cfg(any(esp32c6, esp32h2))]
+    #[cfg(any(esp32, esp32s3, esp32c3, esp32c6))]
     {
         example::main()
     }
 
-    #[cfg(not(any(esp32c6, esp32h2)))]
-    panic!("This example is only supported on ESP32-C6 and ESP32-H2 chips. Please select a different example or target.");
+    #[cfg(not(any(esp32, esp32s3, esp32c3, esp32c6)))]
+    panic!("This example is only supported on ESP32, ESP32-S2, ESP32-S3, ESP32-C3 and ESP32-C6 chips. Please select a different example or target.");
 }
 
-#[cfg(any(esp32c6, esp32h2))]
+#[cfg(any(esp32, esp32s3, esp32c3, esp32c6))]
 mod example {
     use core::pin::pin;
 
     use alloc::sync::Arc;
 
-    use esp_idf_matter::eth::EspEthMatterStack;
+    use embassy_futures::select::{select, Either};
     use esp_idf_matter::init_async_io;
     use esp_idf_matter::matter::crypto::{default_crypto, Crypto};
-    use esp_idf_matter::matter::dm::clusters::desc::{ClusterHandler as _, DescHandler};
-    use esp_idf_matter::matter::dm::clusters::gen_diag::InterfaceTypeEnum;
+    use esp_idf_matter::matter::dm::clusters::desc::{self, ClusterHandler as _, DescHandler};
     use esp_idf_matter::matter::dm::clusters::on_off::test::TestOnOffDeviceLogic;
     use esp_idf_matter::matter::dm::clusters::on_off::{self, OnOffHandler, OnOffHooks};
     use esp_idf_matter::matter::dm::devices::test::{
@@ -37,21 +41,24 @@ mod example {
     };
     use esp_idf_matter::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
     use esp_idf_matter::matter::dm::{Async, Dataver, EmptyHandler, Endpoint, EpClMatcher, Node};
-    use esp_idf_matter::matter::persist::DummyKvBlobStore;
+    use esp_idf_matter::matter::error::Error;
     use esp_idf_matter::matter::utils::init::InitMaybeUninit;
+    use esp_idf_matter::matter::utils::select::Coalesce;
     use esp_idf_matter::matter::{clusters, devices};
-    use esp_idf_matter::netif::{EspMatterNetStack, EspMatterNetif};
-    use esp_idf_matter::thread::EspMatterThreadSrp;
+    use esp_idf_matter::persist::EspKvBlobStore;
+    use esp_idf_matter::wireless::{EspMatterWifi, EspWifiMatterStack};
 
+    use esp_idf_svc::bt::reduce_bt_memory;
     use esp_idf_svc::eventloop::EspSystemEventLoop;
+    use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
     use esp_idf_svc::hal::peripherals::Peripherals;
     use esp_idf_svc::hal::task::block_on;
     use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
     use esp_idf_svc::io::vfs::MountedEventfs;
     use esp_idf_svc::nvs::EspDefaultNvsPartition;
-    use esp_idf_svc::thread::EspThread;
+    use esp_idf_svc::timer::EspTaskTimerService;
 
-    use log::{error, info};
+    use log::{error, info, warn};
 
     use static_cell::StaticCell;
 
@@ -60,7 +67,7 @@ mod example {
     const STACK_SIZE: usize = 20 * 1024; // Can go down to 15K for esp32c6
     const BUMP_SIZE: usize = 13500;
 
-    const THREAD_DATASET: &str = env!("THREAD_DATASET");
+    const RESET_SECS: u64 = 3;
 
     pub fn main() -> Result<(), anyhow::Error> {
         esp_idf_svc::log::init_from_env();
@@ -103,7 +110,7 @@ mod example {
         // as we'll run it in this thread
         let stack = MATTER_STACK
             .uninit()
-            .init_with(EspEthMatterStack::init_default(
+            .init_with(EspWifiMatterStack::init_default(
                 &TEST_DEV_DET,
                 TEST_DEV_COMM,
                 &TEST_DEV_ATT,
@@ -111,44 +118,21 @@ mod example {
 
         // Take some generic ESP-IDF stuff we'll need later
         let sysloop = EspSystemEventLoop::take()?;
+        let timers = EspTaskTimerService::new()?;
         let nvs = EspDefaultNvsPartition::take()?;
-        let peripherals = Peripherals::take()?;
+        let mut peripherals = Peripherals::take()?;
 
-        let mounted_event_fs = Arc::new(MountedEventfs::mount(6)?);
+        let mounted_event_fs = Arc::new(MountedEventfs::mount(3)?);
         init_async_io(mounted_event_fs.clone())?;
 
-        // Configure and start Thread first
-        let mut thread = EspThread::new(
-            peripherals.modem,
-            sysloop.clone(),
-            nvs.clone(),
-            mounted_event_fs,
-        )?;
-
-        info!("Thread driver created");
-
-        thread.set_tod_hexstr(THREAD_DATASET)?;
-
-        info!("Thread dataset set to: {THREAD_DATASET}");
-
-        thread.enable_ipv6(true)?;
-
-        info!("Thread IPv6 enabled");
-
-        thread.enable_thread(true)?;
-
-        info!("Thread enabled");
-
-        thread.start()?;
-
-        info!("Thread started");
+        reduce_bt_memory(unsafe { peripherals.modem.reborrow() })?;
 
         // Create the default crypto provider using the STD CSPRNG provided by the `rand` crate
         let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
 
         let mut weak_rand = crypto.weak_rand()?;
 
-        // Our "light" on-off cluster.
+        // Our "light" on-off handler.
         // It will toggle the light state every 5 seconds
         let on_off = OnOffHandler::new_standalone(
             Dataver::new_rand(&mut weak_rand),
@@ -171,48 +155,69 @@ mod example {
             // Just use the one that `rs-matter` provides out of the box
             .chain(
                 EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(DescHandler::CLUSTER.id)),
-                Async(DescHandler::new(Dataver::new_rand(&mut weak_rand)).adapt()),
+                Async(desc::DescHandler::new(Dataver::new_rand(&mut weak_rand)).adapt()),
             );
 
         // Create a KV BLOB store and load any previously saved state of `rs-matter`
-        // `EspKvBlobStore` saves to an ESP-IDF NVS namespace
-        // However, for this demo and for simplicity, we use a dummy KV BLOB store that does nothing
-        let mut kv = DummyKvBlobStore;
+        let mut kv = EspKvBlobStore::new_default(nvs.clone())?;
         stack.startup(&crypto, &mut kv).await?;
 
-        // Wrap the KV BLOB store as a shared reference, so that it can be used both by `rs-matter` and the user
-        let kv = stack.create_shared_kv(kv)?;
+        if stack.is_commissioned() {
+            info!(
+                "To reset, press and hold the Boot Mode pin (GPIO9) for {} or more seconds",
+                RESET_SECS
+            );
+        }
 
-        // Run the Matter stack with our handler
-        // Using `pin!` is completely optional, but reduces the size of the final future
-        let matter = pin!(stack.run_preex(
-            // The Matter stack needs UDP sockets to communicate with other Matter devices
-            EspMatterNetStack::new(),
-            // The Matter stack need access to the netif on which we'll operate
-            // Since we are pretending to use a wired Ethernet connection - yet -
-            // we are using Thread - provide the Thread netif here
-            EspMatterNetif::new(thread.netif(), InterfaceTypeEnum::Thread, sysloop),
-            // The Matter stack needs an mDNS service to advertise itself
-            EspMatterThreadSrp::new(&thread),
-            // The crypto provider
-            &crypto,
-            // Our `AsyncHandler` + `AsyncMetadata` impl
-            (NODE, handler),
-            // The Matter stack needs a blob store to store its state
-            &kv,
-            // No user future to run
-            (),
-        ));
+        {
+            // Wrap the KV BLOB store as a shared reference, so that it can be used both by `rs-matter` and the user
+            let kv = stack.create_shared_kv(&mut kv)?;
 
-        // Run Matter
-        matter.await?;
+            // Run the Matter stack with our handler
+            // Using `pin!` is completely optional, but reduces the size of the final future
+            let mut matter = pin!(stack.run_coex(
+                // The Matter stack needs the Wifi/BLE modem peripheral
+                EspMatterWifi::new_with_builtin_mdns(
+                    peripherals.modem,
+                    sysloop,
+                    timers,
+                    nvs,
+                    stack
+                ),
+                // The crypto provider
+                &crypto,
+                // Our `AsyncHandler` + `AsyncMetadata` impl
+                (NODE, handler),
+                // The Matter stack needs a blob store to store its state
+                &kv,
+                // No user future to run
+                (),
+            ));
 
-        Ok(())
+            // Run Matter and also wait for a reset signal
+            let mut wait_reset = pin!(wait_pin_low(PinDriver::input(
+                peripherals.pins.gpio9,
+                Pull::Down
+            )?));
+
+            select(&mut matter, &mut wait_reset).coalesce().await?;
+        }
+
+        // If we get here, with no errors, this means the user is willing to reset the storage
+        // by holding the BOOT pin low 3 or more seconds
+        warn!("Resetting storage");
+
+        stack.reset(kv).await?;
+
+        warn!("Rebooting...");
+
+        esp_idf_svc::hal::reset::restart()
     }
 
     /// The Matter stack is allocated statically to avoid
     /// program stack blowups.
-    static MATTER_STACK: StaticCell<EspEthMatterStack<BUMP_SIZE, ()>> = StaticCell::new();
+    /// It is also a mandatory requirement when the `WifiBle` stack variation is used.
+    static MATTER_STACK: StaticCell<EspWifiMatterStack<BUMP_SIZE, ()>> = StaticCell::new();
 
     /// Endpoint 0 (the root endpoint) always runs
     /// the hidden Matter system clusters, so we pick ID=1
@@ -222,7 +227,7 @@ mod example {
     const NODE: Node = Node {
         id: 0,
         endpoints: &[
-            EspEthMatterStack::<0, ()>::root_endpoint(),
+            EspWifiMatterStack::<0, ()>::root_endpoint(),
             Endpoint {
                 id: LIGHT_ENDPOINT_ID,
                 device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
@@ -230,4 +235,32 @@ mod example {
             },
         ],
     };
+
+    async fn wait_pin_low(mut pin: PinDriver<'_, Input>) -> Result<(), Error> {
+        loop {
+            let _ = pin.wait_for_low().await;
+
+            // Debounce
+            embassy_time::Timer::after_millis(50).await;
+
+            if pin.is_low() {
+                warn!(
+                    "Detected Boot Mode pin low, keep it low for {} more seconds to reset the storage",
+                    RESET_SECS
+                );
+
+                let result = select(
+                    pin.wait_for_high(),
+                    embassy_time::Timer::after_secs(RESET_SECS),
+                )
+                .await;
+
+                if matches!(result, Either::Second(())) {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
 }

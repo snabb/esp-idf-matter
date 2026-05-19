@@ -13,6 +13,16 @@ Everything necessary to run [`rs-matter`](https://github.com/project-chip/rs-mat
 
 Since ESP-IDF does support the Rust Standard Library, UDP networking just works.
 
+## Event ring-buffer
+
+`esp-idf-matter` re-exports `rs-matter-stack`'s `events-ringbuf-size-*` features. **The default is `events-ringbuf-size-0`**, which disables event emission: `emit_event()` returns `Ok` and the device-side event counter still advances, but no bytes are stored and controllers never see any events. Devices that emit events &mdash; including any Generic Switch (0x000F), and any device required to send `BasicInformation::StartUp` on boot (Matter Core &sect;11.1.6) &mdash; must enable a non-zero size, e.g.:
+
+```toml
+esp-idf-matter = { ..., features = ["events-ringbuf-size-512"] }
+```
+
+See [`rs-matter-stack`](https://github.com/ivmarkov/rs-matter-stack)'s README for sizing guidance.
+
 ## Example
 
 (See also [All examples](#all-examples))
